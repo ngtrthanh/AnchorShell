@@ -1,0 +1,66 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install --no-audit --no-fund
+          }
+
+      - name: Build Windows NSIS installer
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Stage release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe artifacts/
+          "AnchorShell $env:GITHUB_REF_NAME" | Set-Content artifacts/BUILD.txt
+          "Source commit: $env:GITHUB_SHA" | Add-Content artifacts/BUILD.txt
+          Get-ChildItem artifacts/*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Add-Content artifacts/SHA256SUMS.txt
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        run: |
+          $prerelease = ""
+          if ($env:GITHUB_REF_NAME -match "-(alpha|beta|rc)") {
+            $prerelease = "--prerelease"
+          }
+          gh release create $env:GITHUB_REF_NAME artifacts/* --generate-notes --title "AnchorShell $env:GITHUB_REF_NAME" $prerelease
