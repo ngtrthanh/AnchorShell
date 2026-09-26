@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
@@ -32,6 +36,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Resolve release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            "RELEASE_TAG=$env:GITHUB_REF_NAME" | Add-Content $env:GITHUB_ENV
+          } else {
+            "RELEASE_TAG=v0.1.0-alpha.1" | Add-Content $env:GITHUB_ENV
+          }
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -49,7 +62,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe artifacts/
-          "AnchorShell $env:GITHUB_REF_NAME" | Set-Content artifacts/BUILD.txt
+          "AnchorShell $env:RELEASE_TAG" | Set-Content artifacts/BUILD.txt
           "Source commit: $env:GITHUB_SHA" | Add-Content artifacts/BUILD.txt
           Get-ChildItem artifacts/*.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
@@ -59,8 +72,8 @@ jobs:
       - name: Publish GitHub Release
         shell: pwsh
         run: |
-          $prerelease = ""
-          if ($env:GITHUB_REF_NAME -match "-(alpha|beta|rc)") {
-            $prerelease = "--prerelease"
+          if (gh release view $env:RELEASE_TAG 2>$null) {
+            gh release upload $env:RELEASE_TAG artifacts/* --clobber
+          } else {
+            gh release create $env:RELEASE_TAG artifacts/* --target $env:GITHUB_SHA --title "AnchorShell $env:RELEASE_TAG" --prerelease --generate-notes
           }
-          gh release create $env:GITHUB_REF_NAME artifacts/* --generate-notes --title "AnchorShell $env:GITHUB_REF_NAME" $prerelease
