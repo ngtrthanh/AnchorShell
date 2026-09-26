@@ -33,12 +33,14 @@ fn powershell_probe() -> PowerShellInfo {
             edition: "PowerShell 7".into(),
         };
     }
+
     if let Some(path) = find_executable("powershell.exe") {
         return PowerShellInfo {
             executable: Some(path),
             edition: "Windows PowerShell 5.1".into(),
         };
     }
+
     PowerShellInfo {
         executable: None,
         edition: "Unavailable".into(),
@@ -73,7 +75,10 @@ fn launch_powershell() -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![powershell_probe, launch_powershell])
+        .invoke_handler(tauri::generate_handler![
+            powershell_probe,
+            launch_powershell,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running AnchorShell");
 }
