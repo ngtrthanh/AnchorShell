@@ -48,13 +48,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install frontend dependencies
-        shell: pwsh
-        run: |
-          if (Test-Path package-lock.json) {
-            npm ci
-          } else {
-            npm install --no-audit --no-fund
-          }
+        run: npm install --no-audit --no-fund
 
       - name: Frontend production build
         run: npm run build
