@@ -79,7 +79,7 @@ jobs:
           "ANCHORSHELL_CERT_THUMBPRINT=$($cert.Thumbprint)" | Add-Content $env:GITHUB_ENV
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Frontend production build
         run: npm run build
