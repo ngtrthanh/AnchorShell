@@ -4,10 +4,6 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - main
-    paths:
-      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
@@ -27,6 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,34 +33,82 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Resolve release tag
+      - name: Require Windows signing certificate
         shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
-            "RELEASE_TAG=$env:GITHUB_REF_NAME" | Add-Content $env:GITHUB_ENV
-          } else {
-            "RELEASE_TAG=v0.1.0-alpha.1" | Add-Content $env:GITHUB_ENV
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            throw "Missing GitHub Secret WINDOWS_CERTIFICATE (base64-encoded PFX code-signing certificate)."
           }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "Missing GitHub Secret WINDOWS_CERTIFICATE_PASSWORD."
+          }
+
+      - name: Import signing certificate and configure Tauri
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $certPath = Join-Path $env:RUNNER_TEMP "anchorshell-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          $secure = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+
+          if (-not $cert.Thumbprint) {
+            throw "Certificate import failed or has no thumbprint."
+          }
+
+          $timestamp = $env:WINDOWS_TIMESTAMP_URL
+          if ([string]::IsNullOrWhiteSpace($timestamp)) {
+            $timestamp = "http://timestamp.digicert.com"
+          }
+
+          $configPath = "src-tauri/tauri.conf.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          $config.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $cert.Thumbprint -Force
+          $config.bundle.windows | Add-Member -NotePropertyName digestAlgorithm -NotePropertyValue "sha256" -Force
+          $config.bundle.windows | Add-Member -NotePropertyName timestampUrl -NotePropertyValue $timestamp -Force
+          $config | ConvertTo-Json -Depth 100 | Set-Content -Path $configPath -Encoding UTF8
+
+          "ANCHORSHELL_CERT_THUMBPRINT=$($cert.Thumbprint)" | Add-Content $env:GITHUB_ENV
 
       - name: Install dependencies
-        shell: pwsh
-        run: |
-          if (Test-Path package-lock.json) {
-            npm ci
-          } else {
-            npm install --no-audit --no-fund
-          }
+        run: npm ci
 
-      - name: Build Windows NSIS installer
+      - name: Frontend production build
+        run: npm run build
+
+      - name: Build signed Windows NSIS installer
         run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 
-      - name: Stage release
+      - name: Verify Authenticode signatures
+        shell: pwsh
+        run: |
+          $app = "src-tauri/target/x86_64-pc-windows-msvc/release/anchorshell.exe"
+          $installer = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" | Select-Object -First 1
+
+          foreach ($file in @($app, $installer.FullName)) {
+            $sig = Get-AuthenticodeSignature $file
+            Write-Host "$file -> $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne "Valid") {
+              throw "Authenticode verification failed for $file: $($sig.Status)"
+            }
+          }
+
+      - name: Stage release assets
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe artifacts/
-          "AnchorShell $env:RELEASE_TAG" | Set-Content artifacts/BUILD.txt
+          "AnchorShell $env:GITHUB_REF_NAME" | Set-Content artifacts/BUILD.txt
           "Source commit: $env:GITHUB_SHA" | Add-Content artifacts/BUILD.txt
+          "Authenticode certificate: $env:ANCHORSHELL_CERT_THUMBPRINT" | Add-Content artifacts/BUILD.txt
           Get-ChildItem artifacts/*.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)" | Add-Content artifacts/SHA256SUMS.txt
@@ -72,8 +117,8 @@ jobs:
       - name: Publish GitHub Release
         shell: pwsh
         run: |
-          if (gh release view $env:RELEASE_TAG 2>$null) {
-            gh release upload $env:RELEASE_TAG artifacts/* --clobber
-          } else {
-            gh release create $env:RELEASE_TAG artifacts/* --target $env:GITHUB_SHA --title "AnchorShell $env:RELEASE_TAG" --prerelease --generate-notes
+          $prerelease = ""
+          if ($env:GITHUB_REF_NAME -match "-(alpha|beta|rc)") {
+            $prerelease = "--prerelease"
           }
+          gh release create $env:GITHUB_REF_NAME artifacts/* --generate-notes --title "AnchorShell $env:GITHUB_REF_NAME" $prerelease
